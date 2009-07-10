@@ -1,0 +1,346 @@
+pcall(require,'luarocks.require')
+
+module("provider.tvsubtitles", package.seeall)
+
+local http = require'socket.http'
+local lfs = require'lfs'
+local zip = require'zip'
+
+local out = io.output();
+
+local baseurl = "http://www.tvsubtitles.net/"
+
+local shows={}
+local getaliases=loadfile'./aliases.conf' 
+local aliases=getaliases and getaliases() 
+aliases = aliases or {
+	["American Dad"]="American Dad!",
+	["DoctorWho [2005]"]="Doctor Who",
+}
+
+local cache={}
+local cacheduration = 3600 * 3 -- 3 hours
+
+local log = log or print
+
+function normalize(name)
+	name = string.gsub(string.lower(name),"[.:_\-'!]","")
+	name = string.gsub(name, "%w+", function(n)
+		return tonumber(n) or string.len(n)>2 and n or ''
+	end)
+	return string.gsub(name, " ","")
+end
+
+function setcache(url, body)
+	local cachedir = "/tmp/.cache/"
+	lfs.mkdir( cachedir )
+	local filename = string.gsub(url, "[/: ]", "-")
+	
+	f = io.open(cachedir .. filename, "w+")
+	f:write(body)
+	f:close()
+	print'caching content'
+	cache[url] = body
+	
+	return body, 200, cachedir .. filename
+end
+
+function getcache(url, code)
+	local body = cache[url]
+	if body then
+		return body, 200
+	end
+
+	local cachedir = "./.cache/"
+	lfs.mkdir( cachedir )
+	local filename = string.gsub(url, "[/: ]", "-")
+	
+	f = io.open(cachedir .. filename, "r")
+	if not f then
+		return nil, code
+	end
+	local body = f:read'*a'
+	f:close()
+	print'got cached'
+	return body, 200, cachedir .. filename
+end
+
+function cacheexpired(url)
+	local cachedir = "./.cache/"
+	lfs.mkdir( cachedir )
+	local filename = string.gsub(url, "[/: ]", "-")
+	
+	local lastdate = lfs.attributes(cachedir .. filename, 'modification') or 0
+	
+	print('cached url:',url,  'expires on:', os.date("%d/%m/%Y %H:%M:%S",(tonumber(lastdate)  + tonumber(cacheduration))) )
+	return not lastdate or (lastdate  + cacheduration) < os.time() 
+end
+
+function geturl(url, force)
+	if force or cacheexpired(url) then
+		body, code = http.request(url)
+		if code == 200 and string.len(body) > 100 then
+			return setcache(url, body)
+		else
+			return getcache(url, code)
+		end
+	else
+		return getcache(url)
+	end
+end
+
+
+function initialize()
+	out:flush()
+	body, c = geturl(baseurl .. "tvshows.html")
+
+	if c~=200 then
+		print(string.format("Erro %s ao obter URL dos shows",tostring(c)))
+		return 1
+	end
+
+	string.gsub(body,
+	'<a href="([^"]-)"><b>([^<]-)</b></a>',
+	function(url, name)
+		shows[normalize(name)] = {
+			name = name,
+			url = baseurl .. url
+		}
+	end)
+
+	for key,name in pairs(aliases) do
+		shows[normalize(key)] = shows[normalize(name)]
+	end
+end
+
+function grabseason(series, season, seasons)
+	out:flush()
+	local seasons = seasons or {}
+	--print'>>>>'
+	--table.foreach(shows, print)
+	if not shows[normalize(series)] then
+		return nil, "Cannot find the show " .. series
+	end
+	
+	-- TODO: make season cache expire
+	if shows[normalize(series)].seasons and shows[normalize(series)].seasons[season] then
+		return shows[normalize(series)].seasons
+	end
+	
+	local url = shows[normalize(series)].url
+	local s
+	url = string.gsub(url, "[%-](%d+)[%-](%d+)[.]html", function(id,ss)
+		s = season or ss
+		return "-" .. tostring(id) .. "-".. tostring(s) .. ".html"
+	end)
+	seasons[s] = seasons[s] or {}
+	body, c, h = geturl(url)
+--print(body)
+	string.gsub(body, '<td>(%d+)x(%d+)<[/]td>.-<a href="([^"]-)"><b>([^<]-)</b></a></td>', 
+		function(season, episode, url, name)
+			season = tonumber(season)
+			episode = tonumber(episode)
+			--print(string.format("%dx%02d %s [%s%s]", season, episode, name, baseurl, url))
+			seasons[season] = seasons[season] or {}
+			seasons[season][episode] = {
+				name = name,
+				rawurl = baseurl .. url
+			}
+		end)
+	
+	shows[normalize(series)].seasons = seasons
+	
+	return seasons
+end
+
+function addsub(episode, subfullpath, release, lang, ondisk)
+	-- TODO: enhance the way we capture quality and dist from filename
+	local _, __, quality, dist = string.find(release, "[(]([^).]-)[.]?([^).]-)[)]")
+	quality, dist = quality or '', dist or release
+	
+	local f = string.gfind(release, '%w+')
+	local words = {}
+	local word = f()
+	while word do table.insert(words, word) word=f() end
+	
+	episode.subs = episode.subs  or {}
+	local number = #episode.subs + 1
+	episode.subs [number] = episode.subs[number] or {}
+	episode.subs [number][lang] = {
+		quality=normalize(quality),
+		dist=normalize(dist),
+		words=words
+	}
+	
+	if ondisk then
+		episode.subs [number][lang].path = subfullpath
+	else
+		episode.subs [number][lang].url = baseurl .. string.format("download-%d.html", episode.id)
+	end
+	
+end
+
+
+function grabepisode(series, seasonno, episodeno, lang)
+	out:flush()
+	assert(series, 'must indicate series')
+	seasonno = tonumber(seasonno)
+	episodeno = tonumber(episodeno)
+	lang = lang or 'en'
+	lang = string.lower(lang)
+	
+	local seasons, msg = grabseason(series, seasonno)
+	
+	if not seasons then
+		return nil, msg
+	end
+	
+	if not (seasons and seasonno and episodeno) then
+		return nil,'cannot load episode'
+	end
+	
+	if not seasons[seasonno] then
+		return nil, 'season does not exist'
+	end
+	
+	if not seasons[seasonno][episodeno] then
+		return nil, 'Episode subtitle cannot be downloaded'
+	end
+	
+	local episode = seasons[seasonno][episodeno]
+	local url = episode.rawurl
+	local body, c, h = geturl(url)
+	
+	if c==200 then
+		log(2,'Downloading subtitle')
+		print(body)
+		string.gsub(body, '[<]a href[=]["][/]subtitle.(%d+)[.]html["][^>].-alt=["]' .. lang .. '["].-title=["]release["][^>]-[>]([^<]-)[<][/]p', 
+			function(id, release)
+				episode.id = id
+				print'Added' print(id, release)
+				addsub(episode, nil, release, lang, false)
+			end)
+	
+	else
+		return nil, 'problem loading url [' .. tostring(url) .. ']'
+	end
+	return episode, episode.subs and #episode.subs or 0
+end
+
+function choosebestsub(episode, file, language)
+	log(2, 'Choosing  the best subtitles among ',episode.subs and #episode.subs ,' to',file.fileName)
+	local language =  language or 'en'
+	if episode.subs and #episode.subs > 0 then 
+		table.foreach(episode.subs, function(_, l)
+			local re = normalize(file.release)
+			local sub = l[language]
+			if sub then
+				local qu = sub.quality
+				local di = sub.dist
+				local words = sub.words
+				
+				local pts = (string.find(re or '', qu or ':') and 2 or 0)
+				pts = pts + (string.find(re or '', di or ':') and 3 or 0)
+				
+				for _,word in pairs(words) do
+					pts = pts + (string.find(re or '', word or ':') and 1 or 0)
+				end
+				
+				if sub.path then
+				    print('lendo:', sub.path)
+					local f = io.open(sub.path, 'r')
+					if f then
+						sub.text  = f:read'*a' or ''
+						f:close()
+						pts = pts + string.len(sub.text)>100 and 1 or -2
+					else
+						print'Could not  open file'
+						pts  = -1
+					end
+				else
+						pts = pts + 1
+				end
+				
+				if not file.bestsub or (  file.bestsub.pts < pts ) then
+					print'Chosen'
+					file.bestsub = {
+						pts = pts,
+						sub=sub
+					}
+				end
+			end
+		end)
+		return file
+	else
+		return nil, "No subtitles for " .. tostring(file.fileName)
+	end
+	
+end
+
+
+	
+	
+function loadsubtitles(files, language)
+	out:flush()
+	local language = language or 'en'
+	local qtd = 0
+	for _,file in pairs(files) do	
+		local episode, subsno = grabepisode(file.series, file.season, file.episode, language)
+		if not episode then
+			return nil, subsno
+		end 
+		local ok, msg = choosebestsub(episode, file, language)
+		if ok then
+			print(file.bestsub.pts, file.bestsub.sub.quality, file.bestsub.sub.dist, file.bestsub.sub.url)
+			local body, c, filename  = geturl(file.bestsub.sub.url)
+			
+			if not c==200 then
+				return nil, 'could not obtain the subtitle url'
+			end
+			
+			--[[
+			if string.sub(body, 1,2)~='PK' then
+				print'Getting script for downloading the file'
+				local url = baseurl
+				string.gsub(body, "var s%d-[^']+[']([^']+)[']", function(frag)
+					url = url .. frag
+				end)
+				print('url:',url)
+				body, c, filename = geturl(url)
+			end
+			]]
+			
+			
+			if not filename then
+				return nil, "Can't guess the subtitle filename"
+			end
+			
+			zf = zip.open(filename)
+			print('Opening Subtitle File', filename)
+			if not zf then
+				return nil, "Can't open zipfile"
+			end
+
+			for f in zf:files() do
+				
+				if string.find(f.filename, ".*[.][sS][rR][tT]") then
+					print('File', f, f.filename)
+					local ff = zf:open(f.filename)
+					file.bestsub.sub.text = ff:read'*a' or ''
+					ff:close()
+					print('LOADED', 'length:', string.len(file.bestsub.sub.text) )
+					qtd = qtd + 1
+				end
+			end
+		else
+			log(2, "There is no Subtitles [" .. tostring(language) .. " ] for " .. tostring(file.fileName))
+		end
+	end
+	return qtd
+end
+
+initialize()
+
+t = grabepisode('Lost', 5, 11, 'en')
+
+table.foreach(t.subs, function(i,v) table.foreach(v.en, print) end)
