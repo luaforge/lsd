@@ -19,9 +19,9 @@ build = {
    type = "none",
    install = { 
    		lua = { 			
-   			["lsd.provider.tvsubtitles"] = [[src/provider/tvsubtitles.lua]],
-   			["lsd.provider.abydosgate"] = [[src/provider/abydosgate.lua]],
+   			["provider.tvsubtitles"] = [[src/provider/tvsubtitles.lua]],
+   			["provider.abydosgate"] = [[src/provider/abydosgate.lua]],
    		},
-   		bin = { "src/lsd.lua" }
+   		bin = { "src/lsd" }
    	}
 }
