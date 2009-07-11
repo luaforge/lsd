@@ -8,7 +8,7 @@ local zip = require'zip'
 
 local out = io.output();
 
-local baseurl = "http://subtitles.stargate-sg1.hu/getsub.php?evad=10x&nyelv=en&mod=lista"
+local baseurl = "http://subtitles.stargate-sg1.hu/getsub.php?evad=A2x&nyelv=en&mod=lista"
 
 local shows={}
 local getaliases=loadfile'./aliases.conf' 
