@@ -12,16 +12,16 @@ description = {
 }
 dependencies = {
    "lua >= 5.1",
-   "luafilesystem >= ",
-   "luasocket >= "
+   "luafilesystem cvs",
+   "luasocket cvs"
 }
 build = {
    type = "none",
    install = { 
-   		lua = {
-   			["lsd"] = [[../src/lsd.lua]],
-   			["lsd.provider.tvsubtitles"] = [[../src/provider/tvsubtitles.lua]],
-   			["lsd.provider.abydosgate"] = [[../src/provider/abydosgate.lua]],
-   		}
+   		lua = { 			
+   			["lsd.provider.tvsubtitles"] = [[src/provider/tvsubtitles.lua]],
+   			["lsd.provider.abydosgate"] = [[src/provider/abydosgate.lua]],
+   		},
+   		bin = { "src/lsd.lua" }
    	}
 }
